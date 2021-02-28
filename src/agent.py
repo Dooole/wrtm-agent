@@ -35,7 +35,7 @@ class AgentHTTPRequestHandler(BaseHTTPRequestHandler):
 		post_data = self.rfile.read(content_length)
 		logging.debug(post_data)
 		self.set_response()
-		self.wfile.write("{\"status\":\"ok\"}".encode("utf-8"))
+		self.wfile.write("{\"status\":\"OK\"}".encode("utf-8"))
 
 def run(server_class=HTTPServer, handler_class=AgentHTTPRequestHandler):
 	server_address = ('', 80)
