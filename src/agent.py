@@ -7,6 +7,7 @@ import getopt
 import hashlib
 import logging
 import random
+import ssl
 
 from http import cookies
 from http.server import HTTPServer
@@ -300,6 +301,12 @@ def agent_run(port):
 	httpd = HTTPServer(("", port), AgentHTTPRequestHandler)
 	try:
 		logging.warning("Agent started on port {}".format(port))
+		httpd.socket = ssl.wrap_socket(
+			httpd.socket,
+			certfile="/etc/agent/agent.pem",
+			keyfile="/etc/agent/agent.key",
+			server_side=True
+		)
 		httpd.serve_forever()
 	except KeyboardInterrupt:
 		logging.warning("Interrupted!")
@@ -321,7 +328,7 @@ if __name__ == "__main__":
 		usage()
 		sys.exit(1)
 
-	port = 80
+	port = 443
 	for o, v in opts:
 		if o in ("-h", "--help"):
 			usage()
