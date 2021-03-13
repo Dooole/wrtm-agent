@@ -234,6 +234,12 @@ class AgentHTTPRequestHandler(BaseHTTPRequestHandler):
 	def do_GET(self):
 		logging.debug("Received GET request for {}".format(self.path))
 
+		if self.path == "/login":
+			self.headers_send(200)
+			resp = { "authorized": self.authorize() }
+			self.wfile.write(json.dumps(resp).encode("utf-8"))
+			return
+
 		if not self.authorize():
 			logging.debug("Unauthorized")
 			self.headers_send(403)
