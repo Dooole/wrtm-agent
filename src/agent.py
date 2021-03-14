@@ -17,10 +17,9 @@ class SessionList:
 	sessions = {}
 
 	def create(self, user):
-		rnum = random.getrandbits(128)
 		hash = hashlib.sha256()
-		hash.update(rnum.to_bytes((rnum.bit_length() // 8) + 1, byteorder="little"))
-		self.sessions[user] = str(hash.hexdigest())
+		hash.update(os.urandom(128))
+		self.sessions[user] = hash.hexdigest()
 		return self.sessions[user]
 
 	def destroy(self, user):
@@ -176,23 +175,31 @@ class AgentHTTPRequestHandler(BaseHTTPRequestHandler):
 		self.send_header("Content-type", "application/json")
 		self.end_headers()
 
+	def authenticate(self, username, password):
+		# Single built-in user for now
+		def_user="root"
+		# 64 bytes salt + 64 bytes SHA256
+		def_hash="928c9ab735d297d432da579ec3aa59311d09c9a36b832fb622b5f6f39fc6dd194813494d137e1631bba301d5acab6e7bb7aa74ce1185d456565ef51d737677b2"
+
+		if username != def_user:
+			logging.debug("Incorrect username")
+			return False
+
+		hash = hashlib.sha256()
+		hash.update(bytearray(password, "utf8"))
+		salt = def_hash[:64]
+		if salt + hash.hexdigest() != def_hash:
+			logging.debug("Incorrect password")
+			return False
+
+		return True
+
 	def login(self, data):
 		if not "username" in data or not "password" in data:
 			logging.debug("Missing login params")
 			return None
 
-		# Single built-in user for now
-		default_user="root"
-		default_hash="4813494d137e1631bba301d5acab6e7bb7aa74ce1185d456565ef51d737677b2"
-
-		if data["username"] != default_user:
-			logging.debug("Incorrect username")
-			return None
-
-		hash = hashlib.sha256()
-		hash.update(bytearray(data["password"], "utf8"))
-		if str(hash.hexdigest()) != default_hash:
-			logging.debug("Incorrect password")
+		if not self.authenticate(data["username"], data["password"]):
 			return None
 
 		token = sessions.create(data["username"])
