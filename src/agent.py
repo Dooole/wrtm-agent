@@ -17,9 +17,11 @@ class SessionList:
 	sessions = {}
 
 	def create(self, user):
-		token = str(random.getrandbits(128))
-		self.sessions[user] = token
-		return token
+		rnum = random.getrandbits(128)
+		hash = hashlib.sha256()
+		hash.update(rnum.to_bytes((rnum.bit_length() // 8) + 1, byteorder="little"))
+		self.sessions[user] = str(hash.hexdigest())
+		return self.sessions[user]
 
 	def destroy(self, user):
 		del self.sessions[user]
