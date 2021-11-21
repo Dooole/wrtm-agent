@@ -6,43 +6,32 @@ import json
 import getopt
 import hashlib
 import logging
-import random
-import ssl
+import time
 
-from http import cookies
-from http.server import HTTPServer
-from http.server import BaseHTTPRequestHandler
+from http.client import HTTPConnection
 
-class SessionList:
-	sessions = {}
-
-	def create(self, user):
-		hash = hashlib.sha256()
-		hash.update(os.urandom(128))
-		self.sessions[user] = hash.hexdigest()
-		return self.sessions[user]
-
-	def destroy(self, user):
-		del self.sessions[user]
-
-	def find(self, token_value):
-		token_user = None
-		for user, token in self.sessions.items():
-			if token == token_value:
-				token_user = user
-				break
-		return token_user
+CTX = {
+	"timeout": 10, # Seconds.
+	"interval": 5, # Seconds.
+	"server": "127.0.0.1",
+	"port": 80,
+	"password": ""
+}
 
 class Statistics:
-	def uname(self):
-		uname = os.uname()
-		return {
-			"sysname": uname.sysname,
-			"nodename": uname.nodename,
-			"release": uname.release,
-			"version": uname.version,
-			"machine": uname.machine
-		}
+	def __init__(self, status):
+		self.status = status
+		self.uname = os.uname()
+
+	def mac_address(self):
+		try:
+			fh = open("/sys/class/net/eth0/address", "r")
+			data = fh.readline()
+			fh.close()
+			return data.strip()
+		except:
+			logging.error("Failed to read mac file")
+			return "00:00:00:00:00:00"
 
 	def cpu_load(self):
 		try:
@@ -52,6 +41,7 @@ class Statistics:
 			fh.close()
 			return round(float(data), 1)
 		except:
+			logging.error("Failed to exe cpu load command")
 			return 0
 
 	def mem_usage(self):
@@ -68,17 +58,26 @@ class Statistics:
 				return 0
 			return round((used/total) * 100, 1)
 		except:
+			logging.error("Failed to exe mem usage command")
 			return 0
 
-	def build(self):
+	def get(self):
+		model = "{} {} {} {}".format(
+			self.uname.sysname,
+			self.uname.nodename,
+			self.uname.release,
+			self.uname.machine
+		)
 		stats = {
-			"kernelInfo": self.uname(),
 			"system": {
-				"cpuLoad": self.cpu_load(),
-				"memUsage": self.mem_usage()
+				"model": model,
+				"status": self.status,
+				"mac": self.mac_address(),
+				"cpu_load": self.cpu_load(),
+				"memory_usage": self.mem_usage(),
 			}
 		}
-		return json.dumps(stats).encode("utf-8")
+		return stats
 
 class UCIOperations:
 	basecmd = "uci -q"
@@ -86,12 +85,11 @@ class UCIOperations:
 	def exec(self, cmd):
 		fh = os.popen(cmd)
 		if not fh:
+			logging.error("Failed to open uci pipe: {}".format(cmd))
 			return False
 
 		data = fh.readline()
-		if fh.close():
-			return False
-
+		fh.close()
 		return data
 
 	def get(self, key):
@@ -101,7 +99,20 @@ class UCIOperations:
 		return self.exec("{} set {}={}".format(self.basecmd, key, val))
 
 	def set_list(self, key, list):
+		oldlist = self.get(key).split(" ", 1)
 		self.exec("{} delete {}".format(self.basecmd, key))
+		idx = 0
+		for val in list:
+			if idx < len(oldlist):
+				if val == True:
+					self.exec("{} add_list {}={}".format(self.basecmd, key, oldlist[idx]))
+				else:
+					self.exec("{} add_list {}={}".format(self.basecmd, key, val))
+				idx = idx + 1
+			elif val != True:
+				self.exec("{} add_list {}={}".format(self.basecmd, key, val))
+
+	def add_list(self, key, list):
 		for val in list:
 			self.exec("{} add_list {}={}".format(self.basecmd, key, val))
 
@@ -113,7 +124,7 @@ class UCIOperations:
 
 	def modified(self):
 		out = self.exec("{} changes".format(self.basecmd))
-		if out != False and len(out) > 0:
+		if len(out) > 0:
 			return True
 		else:
 			return False
@@ -121,221 +132,160 @@ class UCIOperations:
 class Configuration:
 	uci = UCIOperations()
 
-	def build(self):
+	def get(self):
+		dns =  self.uci.get("network.wan.dns").split(" ", 1)
+		dns1 = "0.0.0.0"
+		if 0 < len(dns):
+			dns1 = dns[0]
+		dns2 = "0.0.0.0"
+		if 1 < len(dns):
+			dns2 = dns[1]
+
 		config = {
 			"system": {
 				"hostname": self.uci.get("system.@system[0].hostname")
 			},
 			"network": {
 				"ip": self.uci.get("network.wan.ipaddr"),
-				"nm": self.uci.get("network.wan.netmask"),
-				"gw": self.uci.get("network.wan.gateway"),
-				"dns": self.uci.get("network.wan.dns").split(" ", 1)
+				"netmask": self.uci.get("network.wan.netmask"),
+				"gateway": self.uci.get("network.wan.gateway"),
+				"dns1": dns1,
+				"dns2": dns2,
 			}
 		}
-		return json.dumps(config).encode("utf-8")
+		return config
 
-	def push(self, data):
+	def set(self, cfg):
 		reboot = False
 
-		if "system" in data:
-			if "hostname" in data["system"]:
-				self.uci.set("system.@system[0].hostname", data["system"]["hostname"])
+		if "system" in cfg:
+			if "hostname" in cfg["system"]:
+				self.uci.set("system.@system[0].hostname", cfg["system"]["hostname"])
 
 			if self.uci.modified():
 				reboot = True
+				logging.warning("System config modified")
 				self.uci.commit("system")
+			else:
+				logging.warning("System config not changed")
 
-		if "network" in data:
-			if "ip" in data["network"]:
-				self.uci.set("network.wan.ipaddr", data["network"]["ip"])
-			if "nm" in data["network"]:
-				self.uci.set("network.wan.netmask", data["network"]["nm"])
-			if "gw" in data["network"]:
-				self.uci.set("network.wan.gateway", data["network"]["gw"])
-			if "dns" in data["network"]:
-				self.uci.set_list("network.wan.dns", data["network"]["dns"])
-
+		if "network" in cfg:
+			if "ip" in cfg["network"]:
+				self.uci.set("network.wan.ipaddr", cfg["network"]["ip"])
+			if "netmask" in cfg["network"]:
+				self.uci.set("network.wan.netmask", cfg["network"]["netmask"])
+			if "gateway" in cfg["network"]:
+				self.uci.set("network.wan.gateway", cfg["network"]["gateway"])
+			if "dns1" in cfg["network"]:
+				self.uci.set_list("network.wan.dns", [cfg["network"]["dns1"], True])
+			if "dns2" in cfg["network"]:
+				self.uci.set_list("network.wan.dns",[True, cfg["network"]["dns2"]])
+		
 			if self.uci.modified():
 				reboot = True
+				logging.warning("Network config modified")
 				self.uci.commit("network")
+			else:
+				logging.warning("Network config not changed")
 
 		if reboot:
 			logging.warning("Rebooting!")
 			os.system("reboot")
 
-sessions = SessionList()
-
-class AgentHTTPRequestHandler(BaseHTTPRequestHandler):
-	stats = Statistics()
-	config = Configuration()
-
-	def headers_send(self, http_code):
-		self.send_response(http_code)
-		self.send_header("Content-type", "application/json")
-		self.end_headers()
-
-	def authenticate(self, username, password):
-		# Single built-in user for now
-		def_user="root"
-		# 64 bytes salt + 64 bytes SHA256
-		def_hash="928c9ab735d297d432da579ec3aa59311d09c9a36b832fb622b5f6f39fc6dd194813494d137e1631bba301d5acab6e7bb7aa74ce1185d456565ef51d737677b2"
-
-		if username != def_user:
-			logging.debug("Incorrect username")
-			return False
-
-		hash = hashlib.sha256()
-		hash.update(bytearray(password, "utf8"))
-		salt = def_hash[:64]
-		if salt + hash.hexdigest() != def_hash:
-			logging.debug("Incorrect password")
-			return False
-
-		return True
-
-	def login(self, data):
-		if not "username" in data or not "password" in data:
-			logging.debug("Missing login params")
-			return None
-
-		if not self.authenticate(data["username"], data["password"]):
-			return None
-
-		token = sessions.create(data["username"])
-		return token
-
-	def session_user_get(self):
-		if not "Cookie" in self.headers:
-			logging.debug("No cookie")
-			return None
-
-		cookie = cookies.SimpleCookie()
-		cookie.load(self.headers["Cookie"])
-		if not "token" in cookie or not cookie["token"].value:
-			logging.debug("No security token")
-			return None
-
-		user = sessions.find(cookie["token"].value)
-		if not user:
-			logging.debug("Token not found")
-			return None
-
-		return user
-
-	def authorize(self):
-		user = self.session_user_get()
-		if not user:
-			logging.debug("No such user")
-			return False
-
-		logging.debug("Logged in: '{}'".format(user))
-		return True
-
-	def logout(self):
-		user = self.session_user_get()
-		if not user:
-			logging.debug("No such user")
-			return False
-
-		sessions.destroy(user)
-
-	def do_GET(self):
-		logging.debug("Received GET request for {}".format(self.path))
-
-		if self.path == "/login":
-			self.headers_send(200)
-			resp = { "authorized": self.authorize() }
-			self.wfile.write(json.dumps(resp).encode("utf-8"))
-			return
-
-		if not self.authorize():
-			logging.debug("Unauthorized")
-			self.headers_send(403)
-			return
-
-		if self.path == "/logout":
-			self.logout()
-			self.headers_send(200)
-		elif self.path == "/config":
-			self.headers_send(200)
-			self.wfile.write(self.config.build())
-		elif self.path == "/stats":
-			self.headers_send(200)
-			self.wfile.write(self.stats.build())
-		else:
-			logging.debug("Unsupported URI")
-			self.headers_send(404)
-
-	def do_POST(self):
-		logging.debug("Received POST request")
-		length = int(self.headers["Content-Length"])
-		if length == 0:
-			logging.debug("Zero post length")
-			self.headers_send(400)
-			return
-
-		data = self.rfile.read(length).decode("utf-8")
-		if not data:
-			logging.debug("Failed to read post")
-			self.headers_send(400)
-			return
-		logging.debug(data)
-
-		jsondata = json.loads(data)
-		if not jsondata:
-			logging.debug("Failed to parse post")
-			self.headers_send(400)
-			return
-
-		if self.path == "/login":
-			token = self.login(jsondata)
-			if token:
-				self.headers_send(200)
-				resp = { "token": token }
-				self.wfile.write(json.dumps(resp).encode("utf-8"))
-				return
-			else:
-				logging.debug("Login failed")
-				self.headers_send(400)
-				return
-
-		if not self.authorize():
-			logging.debug("Unauthorized")
-			self.headers_send(403)
-			return
-
-		if self.path == "/config":
-			self.config.push(jsondata)
-			self.headers_send(200)
-		else:
-			logging.debug("Unsupported URI")
-			self.headers_send(404)
-
-def agent_run(port):
-	httpd = HTTPServer(("", port), AgentHTTPRequestHandler)
+def server_send(datadict):
 	try:
-		logging.warning("Agent started on port {}".format(port))
-		httpd.socket = ssl.wrap_socket(
-			httpd.socket,
-			certfile="/etc/agent/agent.pem",
-			keyfile="/etc/agent/agent.key",
-			server_side=True
-		)
-		httpd.serve_forever()
+		reqdata = json.dumps(datadict).encode("utf-8")
+	except:
+		logging.error("Failed to serialize request data")
+		return None
+
+	headers = {"Content-type": "application/json"}
+	conn = HTTPConnection(CTX["server"], CTX["port"], CTX["timeout"])
+	try:
+		conn.request("POST", "/wrtapp/provisioning", reqdata, headers)
+	except:
+		logging.error("Failed to send request")
+		conn.close()
+		return None
+
+	response = conn.getresponse()
+	if response.status != 200:
+		logging.error("Server returned error: {}".format(str(response.status)))
+		conn.close()
+		return None
+
+	respdata = response.read()
+	if not respdata:
+		logging.error("Failed to read response data")
+		conn.close()
+		return None
+
+	conn.close()
+	try:
+		resp = json.loads(respdata.decode("utf-8"))
+		return resp
+	except:
+		logging.error("Failed to deserialize response data")
+		return None
+
+def calculate_token():
+	hash = hashlib.sha256()
+	hash.update(bytearray(CTX["password"], "utf8"))
+	return hash.hexdigest()
+
+def provisioning_sync():
+	config = Configuration()
+	configdict = config.get()
+
+	initStats = Statistics("OK")
+	reqdict = {
+		"statistics": initStats.get(),
+		"configuration": configdict,
+		"token": calculate_token(),
+	}
+
+	respdict = server_send(reqdict)
+	if not respdict:
+		logging.warning("No data from server")
+		return
+	if not "configuration" in respdict:
+		return
+
+	logging.warning("Received new configuration")
+	# Update device state on backend.
+	interimStats = Statistics("CONFIGURING")
+	reqdict["statistics"] = interimStats.get()
+	server_send(reqdict)
+
+	# Apply new config
+	config.set(respdict["configuration"])
+
+def agent_run():
+	try:
+		logging.warning("Agent started, server {}:{}".format(CTX["server"], CTX["port"]))
+
+		while True:
+			try:
+				provisioning_sync()
+			except:
+				logging.error("Failed to sync provisioning")
+			time.sleep(CTX["interval"])
+
 	except KeyboardInterrupt:
 		logging.warning("Interrupted!")
-	httpd.server_close()
 
 def usage():
 	name = os.path.basename(__file__)
 	sys.stdout.write("usage: %s [OPTION]\n"
 		"\t-h --help          show this usage\n"
-		"\t-p --port          bind to this port\n" % (name));
+		"\t-s --server        server IP/hostname\n"
+		"\t-p --port          server port\n"
+		"\t-w --password      server password\n"
+		"\t-i --interval      update interval\n" % (name));
 
 if __name__ == "__main__":
-	shortopts = "hp:"
-	longopts = ["help", "port"]
+	shortopts = "hs:p:w:i:"
+	longopts = ["help", "server", "port", "password", "interval"]
 	try:
 		opts, args = getopt.getopt(sys.argv[1:], shortopts, longopts)
 	except getopt.GetoptError as e:
@@ -343,22 +293,40 @@ if __name__ == "__main__":
 		usage()
 		sys.exit(1)
 
-	port = 443
 	for o, v in opts:
 		if o in ("-h", "--help"):
 			usage()
 			sys.exit(0)
+		elif o in ("-s", "--server"):
+			server = str(v)
+			if len(server) == 0:
+				sys.stderr.write("Invalid server!\n")
+				sys.exit(1)
+			CTX["server"] = server
 		elif o in ("-p", "--port"):
 			port = int(v)
 			if port <= 0 or port > 65536:
 				sys.stderr.write("Invalid port!\n")
 				sys.exit(1)
+			CTX["port"] = port
+		elif o in ("-w", "--password"):
+			password = str(v)
+			if len(password) == 0:
+				sys.stderr.write("Invalid password!\n")
+				sys.exit(1)
+			CTX["password"] = password
+		elif o in ("-i", "--interval"):
+			interval = int(v)
+			if interval < 5 or interval > 300:
+				sys.stderr.write("Invalid interval!\n")
+				sys.exit(1)
+			CTX["interval"] = interval
 		else:
 			assert False, "invalid option(s)"
 			usage()
 			sys.exit(1)
 
-	agent_run(port)
+	agent_run()
 else:
 	sys.stderr.write("This is a script only!")
 	sys.exit(1)
