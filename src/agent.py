@@ -7,9 +7,8 @@ import getopt
 import hashlib
 import logging
 import time
-import ssl
 
-from http.client import HTTPSConnection
+from http.client import HTTPConnection
 
 CTX = {
 	"timeout": 10, # Seconds.
@@ -201,7 +200,7 @@ def server_send(datadict):
 		return None
 
 	headers = {"Content-type": "application/json"}
-	conn = HTTPSConnection(CTX["server"], CTX["port"], context = ssl._create_unverified_context())
+	conn = HTTPConnection(CTX["server"], CTX["port"], CTX["timeout"])
 	try:
 		conn.request("POST", "/wrtapp/provisioning", reqdata, headers)
 	except:
