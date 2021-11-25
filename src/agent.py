@@ -10,6 +10,7 @@ import time
 
 from http.client import HTTPConnection
 
+#stores cmd arguments
 CTX = {
 	"timeout": 10, # Seconds.
 	"interval": 5, # Seconds.
@@ -18,14 +19,14 @@ CTX = {
 	"password": ""
 }
 
-class Statistics:
+class Statistics: #class to collect device stats, manily based on pipe to system shell commands 
 	def __init__(self, status):
 		self.status = status
-		self.uname = os.uname()
+		self.uname = os.uname() #py builtin method which returns general system info
 
 	def mac_address(self):
 		try:
-			fh = open("/sys/class/net/eth0/address", "r")
+			fh = open("/sys/class/net/eth0/address", "r") #directly reads mac addr from file
 			data = fh.readline()
 			fh.close()
 			return data.strip()
@@ -35,11 +36,11 @@ class Statistics:
 
 	def cpu_load(self):
 		try:
-			cmd = '''grep 'cpu ' /proc/stat | awk '{usage=($2+$4)*100/($2+$4+$5)} END {print usage }' '''
+			cmd = '''grep 'cpu ' /proc/stat | awk '{usage=($2+$4)*100/($2+$4+$5)} END {print usage }' ''' #exsecutes grep and awk in shell to get cpu load as string
 			fh = os.popen(cmd)
 			data = fh.readline()
 			fh.close()
-			return round(float(data), 1)
+			return round(float(data), 1) #converts string to floating point number with 1 digit precision
 		except:
 			logging.error("Failed to exe cpu load command")
 			return 0
@@ -79,11 +80,11 @@ class Statistics:
 		}
 		return stats
 
-class UCIOperations:
+class UCIOperations: #class to set, get and delete uci config , implemented as a wraper of uci shell command
 	basecmd = "uci -q"
 
 	def exec(self, cmd):
-		fh = os.popen(cmd)
+		fh = os.popen(cmd) #opens pipe to the shell, exsecutes uci command and returns result
 		if not fh:
 			logging.error("Failed to open uci pipe: {}".format(cmd))
 			return False
@@ -129,10 +130,11 @@ class UCIOperations:
 		else:
 			return False
 
+#class for config collection and application
 class Configuration:
-	uci = UCIOperations()
+	uci = UCIOperations() #obj to manipulate openwrt uci config (native config)
 
-	def get(self):
+	def get(self): #collects current uci config into py dict
 		dns =  self.uci.get("network.wan.dns").split(" ", 1)
 		dns1 = "0.0.0.0"
 		if 0 < len(dns):
@@ -155,7 +157,7 @@ class Configuration:
 		}
 		return config
 
-	def set(self, cfg):
+	def set(self, cfg): #parses py dict and applies it as new uci config
 		reboot = False
 
 		if "system" in cfg:
@@ -192,6 +194,8 @@ class Configuration:
 			logging.warning("Rebooting!")
 			os.system("reboot")
 
+#input is python dict. function serializes this dict, sends to provided server, 
+#waits for response, deserializes response to dict, and returns dict
 def server_send(datadict):
 	try:
 		reqdata = json.dumps(datadict).encode("utf-8")
@@ -233,14 +237,15 @@ def calculate_token():
 	hash.update(bytearray(CTX["password"], "utf8"))
 	return hash.hexdigest()
 
+#collect device current config and stats , sends to server 
+#parse response, set new config if exsits
 def provisioning_sync():
 	config = Configuration()
-	configdict = config.get()
+	initStats = Statistics("OK") 
 
-	initStats = Statistics("OK")
 	reqdict = {
 		"statistics": initStats.get(),
-		"configuration": configdict,
+		"configuration": config.get(),
 		"token": calculate_token(),
 	}
 
@@ -266,7 +271,7 @@ def agent_run():
 
 		while True:
 			try:
-				provisioning_sync()
+				provisioning_sync() #main agent function
 			except:
 				logging.error("Failed to sync provisioning")
 			time.sleep(CTX["interval"])
@@ -283,6 +288,7 @@ def usage():
 		"\t-w --password      server password\n"
 		"\t-i --interval      update interval\n" % (name));
 
+#script start, exit if module
 if __name__ == "__main__":
 	shortopts = "hs:p:w:i:"
 	longopts = ["help", "server", "port", "password", "interval"]
@@ -326,7 +332,7 @@ if __name__ == "__main__":
 			usage()
 			sys.exit(1)
 
-	agent_run()
+	agent_run() #infinite loop function
 else:
 	sys.stderr.write("This is a script only!")
 	sys.exit(1)
